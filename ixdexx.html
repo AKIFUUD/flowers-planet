@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D ASCII Flower Planetoid</title>
+    <style>
+        /* Полностью чистый полноэкранный чёрный холст без элементов интерфейса */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: #000000;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="meadowCanvas"></canvas>
+
+    <script>
+        /**
+         * 3D ASCII Flower Planetoid Engine
+         * Вращающаяся полусфера-планетоид с чёткой дугой горизонта, мягким туманом по краям,
+         * крупными многослойными 3D-цветами (розы, маки, ромашки, колокольчики, лютики),
+         * колышущейся травой и белыми силуэтами бегущих девочки и мальчика (~раз в 14 секунд).
+         */
+        window.onload = function () {
+            const canvas = document.getElementById('meadowCanvas');
+            const ctx = canvas.getContext('2d', { alpha: false });
+
+            // Наборы плотных ASCII-символов (точки, знаки, цифры и буквы) для глубины и фактуры
+            const DENSE_CHARS  = " .:-=+*#%@0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            const GRASS_CHARS  = " .':|!lI/\\17(){}[]#mnuvwxz";
+            const FLOWER_CHARS = " .:*oO0@%&#$8BWMQRNK";
+            const SILHOUETTE_CHARS = " .:-=+*#%@0123456789$&WMB";
+
+            // Параметры вращающегося планетоида / полусферы и оттянутой камеры
+            const PLANET_RADIUS = 5.4;      // Радиус полусферы-планетоида (чёткая дуга горизонта в кадре)
+            const CAMERA_Z = -9.6;          // Оттянутая камера, чтобы читался круг/полусфера луга
+            const CAMERA_Y = 2.55;          // Приподнятая камера смотрит на цветочный купол и линию горизонта
+            const ROTATION_SPEED = 0.24;    // Скорость вращения планетоида вокруг горизонтальной оси X
+
+            // Состояние вращения и периодического пробега силуэтов (~каждые 14 секунд)
+            let planetAngle = 0;
+            let runnerTimer = 4.0;          // Первый пробег появится вскоре после старта
+            const RUNNER_INTERVAL = 14.0;   // Периодичность пробега: ~14 секунд
+            const RUN_DURATION = 5.4;       // Длительность прохода вдоль дальней дуги луга
+            let runnerDir = 1;              // 1: слева направо, -1: справа налево
+
+            // Детерминированный генератор псевдослучайных чисел для устойчивой 3D-сцены
+            let seed = 90817;
+            function rand() {
+                seed = (seed * 1664525 + 1013904223) % 4294967296;
+                return seed / 4294967296;
+            }
+
+            // Палитры пяти типов крупных цветов: розы, маки, ромашки, колокольчики, лютики
+            const FLOWER_SPECS = [
+                {
+                    kind: 'rose',
+                    layers: 4,
+                    petalsPerLayer: 7,
+                    radius: 0.34,
+                    height: 0.24,
+                    petalMain: [235, 35, 78],
+                    petalEdge: [255, 145, 175],
+                    centerCol: [140, 12, 38]
+                },
+                {
+                    kind: 'poppy',
+                    layers: 3,
+                    petalsPerLayer: 6,
+                    radius: 0.38,
+                    height: 0.19,
+                    petalMain: [250, 46, 52],
+                    petalEdge: [255, 120, 95],
+                    centerCol: [28, 22, 28]
+                },
+                {
+                    kind: 'daisy',
+                    layers: 2,
+                    petalsPerLayer: 12,
+                    radius: 0.36,
+                    height: 0.11,
+                    petalMain: [252, 250, 248],
+                    petalEdge: [215, 226, 248],
+                    centerCol: [255, 200, 32]
+                },
+                {
+                    kind: 'bell',
+                    layers: 3,
+                    petalsPerLayer: 6,
+                    radius: 0.26,
+                    height: -0.22,
+                    petalMain: [165, 115, 255],
+                    petalEdge: [220, 185, 255],
+                    centerCol: [255, 225, 110]
+                },
+                {
+                    kind: 'buttercup',
+                    layers: 3,
+                    petalsPerLayer: 8,
+                    radius: 0.32,
+                    height: 0.16,
+                    petalMain: [255, 205, 22],
+                    petalEdge: [255, 238, 120],
+                    centerCol: [215, 125, 10]
+                }
+            ];
+
+            // Массив 3D-точек поверхности планетоида (в сферических координатах относительно центра барабана)
+            const planetPoints = [];
+
+            /**
+             * Перевод локальных координат на поверхности сферы (широта phi, долгота theta, радиус r)
+             * в точки на вращающемся планетоиде, где ось вращения проходит вдоль оси X.
+             */
+            function addSphereSurfacePoint(phi, theta, r, rgb, lum, chars) {
+                // phi — угол от экватора/верха барабана (-PI/2 .. PI/2 вдоль оси X)
+                // theta — угол вращения вокруг оси X (0 .. 2*PI)
+                const cosPhi = Math.cos(phi);
+                const sinPhi = Math.sin(phi);
+
+                const localX = r * sinPhi;
+                const localRadial = r * cosPhi;
+
+                planetPoints.push({
+                    localX: localX,
+                    localRadial: localRadial,
+                    theta: theta,
+                    rCol: rgb[0],
+                    gCol: rgb[1],
+                    bCol: rgb[2],
+                    lum: lum,
+                    chars: chars
+                });
+            }
+
+            /**
+             * Построение 3D-модели вращающейся полусферы / планетоида с землёй, травой и крупными цветами
+             */
+            function buildPlanetoidMeadow() {
+                planetPoints.length = 0;
+
+                // 1. Поверхность земли / дёрна планетоида
+                const thetaSteps = 150;
+                const phiSteps = 84;
+                for (let i = 0; i < thetaSteps; i++) {
+                    const theta = (i / thetaSteps) * Math.PI * 2;
+                    for (let j = 0; j <= phiSteps; j++) {
+                        const u = (j + (rand() - 0.5) * 0.7) / phiSteps;
+                        const phi = (u * 2 - 1) * (Math.PI * 0.46);
+                        const undulation = Math.sin(phi * 7 + theta * 5) * 0.035;
+                        const r = PLANET_RADIUS + undulation;
+
+                        const shade = 0.55 + rand() * 0.45;
+                        addSphereSurfacePoint(
+                            phi,
+                            theta,
+                            r,
+                            [
+                                Math.round(20 * shade),
+                                Math.round((68 + rand() * 34) * shade),
+                                Math.round(28 * shade)
+                            ],
+                            0.28 + rand() * 0.35,
+                            DENSE_CHARS
+                        );
+                    }
+                }
+
+                // 2. Колышущаяся трава на поверхности планетоида
+                const grassTufts = 2200;
+                for (let g = 0; g < grassTufts; g++) {
+                    const theta = rand() * Math.PI * 2;
+                    const phi = ((rand() * 2 - 1) * 0.92) * (Math.PI * 0.46);
+                    const baseR = PLANET_RADIUS + Math.sin(phi * 7 + theta * 5) * 0.035;
+                    const bladeH = 0.18 + rand() * 0.34;
+                    const bladeTiltPhi = (rand() - 0.5) * 0.045;
+                    const bladeTiltTheta = (rand() - 0.5) * 0.045;
+                    const gMix = rand();
+
+                    const baseRgb = [
+                        Math.round(26 + gMix * 52),
+                        Math.round(125 + gMix * 115),
+                        Math.round(42 + gMix * 48)
+                    ];
+
+                    const segs = 3;
+                    for (let s = 1; s <= segs; s++) {
+                        const f = s / segs;
+                        const tipBoost = 0.65 + f * 0.45;
+                        addSphereSurfacePoint(
+                            phi + bladeTiltPhi * f * f,
+                            theta + bladeTiltTheta * f * f,
+                            baseR + bladeH * f,
+                            [
+                                Math.min(255, Math.round(baseRgb[0] * tipBoost)),
+                                Math.min(255, Math.round(baseRgb[1] * tipBoost)),
+                                Math.min(255, Math.round(baseRgb[2] * tipBoost))
+                            ],
+                            0.45 + f * 0.45,
+                            GRASS_CHARS
+                        );
+                    }
+                }
+
+                // 3. Крупные многослойные цветы и бутоны (розы, маки, ромашки, колокольчики, лютики)
+                const flowerCount = 340;
+                for (let f = 0; f < flowerCount; f++) {
+                    const theta = rand() * Math.PI * 2;
+                    // Распределяем по видимой дуге планетоида, включая дальнюю дугу для силуэтов
+                    const phi = ((rand() * 2 - 1) * 0.88) * (Math.PI * 0.46);
+                    const baseR = PLANET_RADIUS + Math.sin(phi * 7 + theta * 5) * 0.035;
+
+                    const spec = FLOWER_SPECS[Math.floor(rand() * FLOWER_SPECS.length)];
+                    const scale = 0.95 + rand() * 0.55; // Укрупнённые цветы и бутоны
+                    const stemLen = (0.34 + rand() * 0.36) * scale;
+                    const leanPhi = (rand() - 0.5) * 0.03;
+                    const leanTheta = (rand() - 0.5) * 0.03;
+
+                    // Стебель цветка
+                    const stemSteps = 5;
+                    for (let s = 1; s <= stemSteps; s++) {
+                        const sf = s / stemSteps;
+                        addSphereSurfacePoint(
+                            phi + leanPhi * sf,
+                            theta + leanTheta * sf,
+                            baseR + stemLen * sf,
+                            [38, Math.round(145 + sf * 65), 56],
+                            0.55 + sf * 0.3,
+                            GRASS_CHARS
+                        );
+                    }
+
+                    // Листья и чашелистики у основания бутона
+                    const topPhi = phi + leanPhi;
+                    const topTheta = theta + leanTheta;
+                    const headBaseR = baseR + stemLen;
+
+                    for (let sep = 0; sep < 5; sep++) {
+                        const sepAng = (sep / 5) * Math.PI * 2;
+                        for (let k = 1; k <= 3; k++) {
+                            const kf = k / 3;
+                            const dPhi = (Math.cos(sepAng) * kf * 0.16 * scale) / PLANET_RADIUS;
+                            const dTheta = (Math.sin(sepAng) * kf * 0.16 * scale) / PLANET_RADIUS;
+                            addSphereSurfacePoint(
+                                topPhi + dPhi,
+                                topTheta + dTheta,
+                                headBaseR - kf * 0.05 * scale,
+                                [32, 168, 66],
+                                0.68,
+                                GRASS_CHARS
+                            );
+                        }
+                    }
+
+                    // Многослойная головка цветка / бутона
+                    const headCenterR = headBaseR + Math.max(0.08, spec.height * 0.45) * scale;
+
+                    // Текстурированная сердцевина цветка
+                    for (let cy = -1; cy <= 1; cy++) {
+                        for (let cx = -1; cx <= 1; cx++) {
+                            const dPhi = (cx * 0.045 * scale) / PLANET_RADIUS;
+                            const dTheta = (cy * 0.045 * scale) / PLANET_RADIUS;
+                            addSphereSurfacePoint(
+                                topPhi + dPhi,
+                                topTheta + dTheta,
+                                headCenterR + 0.04 * scale,
+                                spec.centerCol,
+                                0.96,
+                                FLOWER_CHARS
+                            );
+                        }
+                    }
+
+                    // Ярусы лепестков (создают объёмный бутон и раскрытый венчик)
+                    for (let l = 1; l <= spec.layers; l++) {
+                        const lf = l / spec.layers;
+                        const ringRadius = spec.radius * scale * lf;
+                        const layerOffsetR = (spec.height * scale) * (spec.kind === 'bell' ? -lf : Math.sin(lf * Math.PI * 0.75));
+                        const layerPhase = l * 0.55 + f;
+
+                        for (let p = 0; p < spec.petalsPerLayer; p++) {
+                            const pAng = (p / spec.petalsPerLayer) * Math.PI * 2 + layerPhase;
+                            const cosA = Math.cos(pAng);
+                            const sinA = Math.sin(pAng);
+
+                            // Два сегмента вдоль каждого лепестка для выразительной формы
+                            for (let seg = 1; seg <= 2; seg++) {
+                                const segF = seg / 2;
+                                const rDist = ringRadius * (0.55 + 0.45 * segF);
+                                const dPhi = (cosA * rDist) / PLANET_RADIUS;
+                                const dTheta = (sinA * rDist) / PLANET_RADIUS;
+
+                                // Лёгкий изгиб кончика лепестка
+                                const cupCurve = spec.kind === 'rose'
+                                    ? (1 - lf * 0.5) * 0.14 * scale * segF
+                                    : (spec.kind === 'bell' ? -0.09 * scale * segF : 0.05 * scale * segF);
+
+                                const mix = Math.min(1, lf * 0.65 + (seg - 1) * 0.3);
+                                const rgb = [
+                                    Math.round(spec.petalMain[0] * (1 - mix) + spec.petalEdge[0] * mix),
+                                    Math.round(spec.petalMain[1] * (1 - mix) + spec.petalEdge[1] * mix),
+                                    Math.round(spec.petalMain[2] * (1 - mix) + spec.petalEdge[2] * mix)
+                                ];
+
+                                addSphereSurfacePoint(
+                                    topPhi + dPhi,
+                                    topTheta + dTheta,
+                                    headCenterR + layerOffsetR + cupCurve,
+                                    rgb,
+                                    0.82 + 0.18 * segF,
+                                    FLOWER_CHARS
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Буферы экрана и Z-буфер
+            let cols = 0;
+            let rows = 0;
+            let charWidth = 6;
+            let charHeight = 10;
+            let fontSize = 10;
+            let zBuffer = new Float32Array(0);
+            let charBuffer = [];
+            let colorBuffer = [];
+
+            /**
+             * Адаптация размеров Canvas и сетки символов под экран пользователя
+             */
+            function resizeCanvas() {
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                canvas.width = Math.floor(width * dpr);
+                canvas.height = Math.floor(height * dpr);
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+                fontSize = width < 640 ? 8 : 10;
+                charHeight = fontSize;
+                charWidth = Math.max(5, Math.floor(fontSize * 0.6));
+
+                cols = Math.ceil(width / charWidth);
+                rows = Math.ceil(height / charHeight);
+
+                const total = cols * rows;
+                zBuffer = new Float32Array(total);
+                charBuffer = new Array(total);
+                colorBuffer = new Array(total);
+            }
+
+            /**
+             * Отрисовка белых силуэтов девочки (с развевающимися волосами и платьем) и бегущего за ней мальчика
+             * по дальней дуге вращающегося планетоида.
+             */
+            function drawWhiteRunners(timeSec, progress, dir, projectFn) {
+                // Движение от одного края дуги планетоида к другому
+                const maxPhi = Math.PI * 0.34;
+                const girlPhi = ((progress * 2 - 1) * maxPhi) * dir;
+                const boyPhi = girlPhi - 0.14 * dir;
+
+                // Дальняя верхняя дуга планетоида, где силуэты хорошо читаются над линией горизонта
+                const arcTheta = 0.56;
+
+                drawSingleWhiteSilhouette({
+                    phi: girlPhi,
+                    theta: arcTheta,
+                    dir: dir,
+                    timeSec: timeSec,
+                    phase: 0,
+                    scale: 0.92,
+                    isGirl: true,
+                    projectFn: projectFn
+                });
+
+                drawSingleWhiteSilhouette({
+                    phi: boyPhi,
+                    theta: arcTheta + 0.025,
+                    dir: dir,
+                    timeSec: timeSec,
+                    phase: 1.5,
+                    scale: 0.96,
+                    isGirl: false,
+                    projectFn: projectFn
+                });
+            }
+
+            /**
+             * Генерация точек одного бегущего силуэта в оттенках белого и серебристого (#ffffff .. #d4dae6)
+             */
+            function drawSingleWhiteSilhouette(opts) {
+                const { phi, theta, dir, timeSec, phase, scale, isGirl, projectFn } = opts;
+
+                const stride = timeSec * 11.0 + phase;
+                const hop = Math.abs(Math.sin(stride)) * 0.08 * scale;
+                const baseR = PLANET_RADIUS + hop;
+
+                function emitWhitePoint(dPhiArc, heightAboveGround, radialDepth, shadeFactor, lumBoost) {
+                    // Оттенки белого и серебристого от #d4dae6 (212, 218, 230) до #ffffff (255, 255, 255)
+                    const t = Math.max(0, Math.min(1, shadeFactor));
+                    const r = Math.round(212 + (255 - 212) * t);
+                    const g = Math.round(218 + (255 - 218) * t);
+                    const b = Math.round(230 + (255 - 230) * t);
+
+                    const pPhi = phi + dPhiArc;
+                    const pR = baseR + heightAboveGround;
+                    const pTheta = theta + radialDepth / PLANET_RADIUS;
+
+                    const wx = pR * Math.sin(pPhi);
+                    const wy = pR * Math.cos(pPhi) * Math.cos(pTheta);
+                    const wz = pR * Math.cos(pPhi) * Math.sin(pTheta);
+
+                    projectFn(wx, wy, wz, r, g, b, Math.min(1, lumBoost), SILHOUETTE_CHARS, true);
+                }
+
+                const stepPhi = 0.011 * scale;
+
+                // 1. Голова
+                const headH = 1.02 * scale;
+                for (let hy = -2; hy <= 2; hy++) {
+                    for (let hx = -2; hx <= 2; hx++) {
+                        if (hx * hx + hy * hy <= 5) {
+                            emitWhitePoint(
+                                hx * stepPhi * 0.65,
+                                headH + hy * 0.035 * scale,
+                                0,
+                                0.95,
+                                1.0
+                            );
+                        }
+                    }
+                }
+
+                // 2. Развевающиеся волосы у девочки (шлейф назад при беге)
+                if (isGirl) {
+                    for (let h = 1; h <= 9; h++) {
+                        const hf = h / 9;
+                        const wave = Math.sin(stride * 1.3 - hf * 3.2) * 0.045 * scale;
+                        emitWhitePoint(
+                            -dir * hf * 0.085 * scale,
+                            headH + 0.03 * scale - hf * 0.22 * scale + wave,
+                            -0.02 * hf,
+                            0.72 - hf * 0.25,
+                            0.92
+                        );
+                    }
+                }
+
+                // 3. Туловище и платье / одежда
+                const hipH = 0.52 * scale;
+                const shoulderH = 0.88 * scale;
+                for (let yStep = 0; yStep <= 7; yStep++) {
+                    const yf = yStep / 7; // 0 у пояса, 1 у плеч
+                    const curH = hipH + yf * (shoulderH - hipH);
+                    const halfSpan = isGirl
+                        ? (0.062 * (1 - yf * 0.55) + Math.sin(stride + yf * 2) * 0.008) * scale
+                        : (0.034 + yf * 0.014) * scale;
+
+                    for (let w = -3; w <= 3; w++) {
+                        const wf = w / 3;
+                        const dressFlow = isGirl
+                            ? Math.sin(stride * 1.4 - (1 - yf) * 2.4) * 0.022 * (1 - yf) * (-dir) * scale
+                            : 0;
+                        emitWhitePoint(
+                            wf * halfSpan + dressFlow,
+                            curH,
+                            0,
+                            0.65 + yf * 0.3,
+                            0.96
+                        );
+                    }
+                }
+
+                // 4. Руки в движении
+                for (let side = -1; side <= 1; side += 2) {
+                    const armSwing = Math.sin(stride + (side > 0 ? Math.PI : 0)) * 0.045 * scale;
+                    for (let s = 1; s <= 4; s++) {
+                        const sf = s / 4;
+                        emitWhitePoint(
+                            armSwing * sf * dir,
+                            shoulderH - sf * 0.26 * scale,
+                            side * 0.05 * scale,
+                            0.55 + sf * 0.25,
+                            0.9
+                        );
+                    }
+                }
+
+                // 5. Бегущие ноги
+                for (let leg = -1; leg <= 1; leg += 2) {
+                    const legPhase = stride + (leg > 0 ? 0 : Math.PI);
+                    const strideArc = Math.sin(legPhase) * 0.068 * scale;
+                    const liftH = Math.max(0, -Math.cos(legPhase)) * 0.14 * scale;
+
+                    for (let s = 1; s <= 5; s++) {
+                        const sf = s / 5;
+                        emitWhitePoint(
+                            strideArc * sf * dir,
+                            Math.max(0.02, hipH - sf * (hipH - liftH)),
+                            leg * 0.035 * scale,
+                            0.45 + sf * 0.35,
+                            0.94
+                        );
+                    }
+                }
+            }
+
+            /**
+             * Главный цикл рендеринга 3D ASCII-сцены
+             */
+            let lastTime = performance.now();
+
+            function render(now) {
+                const dt = Math.min((now - lastTime) / 1000, 0.1);
+                lastTime = now;
+                const timeSec = now * 0.001;
+
+                // Вращение планетоида вокруг горизонтальной оси X для ощущения непрерывного движения
+                planetAngle -= ROTATION_SPEED * dt;
+
+                // Таймер периодического пробега девочки и мальчика (~каждые 14 секунд)
+                runnerTimer += dt;
+                if (runnerTimer >= RUNNER_INTERVAL) {
+                    runnerTimer = 0;
+                    runnerDir *= -1;
+                }
+
+                // Очистка буферов кадра
+                zBuffer.fill(Infinity);
+                charBuffer.fill(null);
+
+                const focal = Math.min(window.innerWidth, window.innerHeight) * 0.92;
+                const centerX = cols * 0.5;
+                const centerY = rows * 0.52;
+
+                // Лёгкий наклон камеры вниз к центру планетоида
+                const pitch = -0.22;
+                const cosP = Math.cos(pitch);
+                const sinP = Math.sin(pitch);
+
+                /**
+                 * Проекция точки (wx, wy, wz) в ASCII-ячейку с мягким туманом по краям и глубине
+                 */
+                function projectPoint(wx, wy, wz, rCol, gCol, bCol, lum, charSet, isSilhouette) {
+                    const dx = wx;
+                    const dy = wy - CAMERA_Y;
+                    const dz = wz - CAMERA_Z;
+
+                    const cy = dy * cosP - dz * sinP;
+                    const cz = dy * sinP + dz * cosP;
+
+                    if (cz <= 1.2 || cz > 22.0) return;
+
+                    const sx = Math.floor(centerX + (dx * focal / cz) / charWidth);
+                    const sy = Math.floor(centerY - (cy * focal / cz) / charHeight);
+
+                    if (sx < 0 || sx >= cols || sy < 0 || sy >= rows) return;
+
+                    const idx = sy * cols + sx;
+                    if (cz < zBuffer[idx]) {
+                        zBuffer[idx] = cz;
+
+                        // Мягкий край/туман по глубине и удалению от центра планетоида
+                        const radialDist = Math.hypot(wx, wy);
+                        const edgeFade = Math.max(0.14, Math.min(1.0, 1.28 - (radialDist / (PLANET_RADIUS * 1.18))));
+                        const depthFog = Math.max(0.18, Math.min(1.05, 1.25 - (cz / 20.5)));
+                        const fogFactor = isSilhouette ? Math.max(0.55, depthFog) : (edgeFade * depthFog);
+
+                        const finalLum = Math.max(0.06, Math.min(1.0, lum * fogFactor));
+                        const cIdx = Math.max(1, Math.min(charSet.length - 1, Math.floor(finalLum * (charSet.length - 1))));
+                        charBuffer[idx] = charSet[cIdx];
+
+                        const colorScale = isSilhouette ? (0.78 + 0.22 * fogFactor) : (0.35 + 0.75 * fogFactor);
+                        const fr = Math.min(255, Math.round(rCol * colorScale));
+                        const fg = Math.min(255, Math.round(gCol * colorScale));
+                        const fb = Math.min(255, Math.round(bCol * colorScale));
+
+                        colorBuffer[idx] = `rgb(${fr},${fg},${fb})`;
+                    }
+                }
+
+                // 1. Отрисовка вращающейся полусферы / планетоида с травой и цветами
+                for (let i = 0; i < planetPoints.length; i++) {
+                    const p = planetPoints[i];
+                    const worldTheta = p.theta + planetAngle;
+                    const cosT = Math.cos(worldTheta);
+
+                    // Отсекаем дальнюю невидимую часть цилиндра/сферы
+                    if (cosT < -0.35) continue;
+
+                    const sinT = Math.sin(worldTheta);
+                    // Мягкое колебание цветов и травы от ветра
+                    const sway = Math.sin(timeSec * 2.4 + p.localX * 1.7 + p.theta * 3) * 0.025;
+
+                    const wx = p.localX + sway;
+                    const wy = p.localRadial * cosT;
+                    const wz = p.localRadial * sinT;
+
+                    projectPoint(wx, wy, wz, p.rCol, p.gCol, p.bCol, p.lum, p.chars, false);
+                }
+
+                // 2. Периодический пробег белых силуэтов девочки и мальчика вдоль дальней дуги луга
+                if (runnerTimer <= RUN_DURATION) {
+                    const progress = runnerTimer / RUN_DURATION;
+                    drawWhiteRunners(timeSec, progress, runnerDir, projectPoint);
+                }
+
+                // 3. Рендеринг на чистом чёрном фоне (#000000) с мягким свечением силуэтов
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+                ctx.font = `bold ${fontSize}px "Courier New", Courier, monospace`;
+                ctx.textBaseline = 'top';
+
+                let lastColor = '';
+                for (let r = 0; r < rows; r++) {
+                    const rowBase = r * cols;
+                    const py = r * charHeight;
+                    for (let c = 0; c < cols; c++) {
+                        const idx = rowBase + c;
+                        const ch = charBuffer[idx];
+                        if (ch) {
+                            const col = colorBuffer[idx];
+                            if (col !== lastColor) {
+                                ctx.fillStyle = col;
+                                lastColor = col;
+                            }
+                            ctx.fillText(ch, c * charWidth, py);
+                        }
+                    }
+                }
+
+                requestAnimationFrame(render);
+            }
+
+            window.addEventListener('resize', resizeCanvas);
+
+            // Запуск анимации
+            buildPlanetoidMeadow();
+            resizeCanvas();
+            requestAnimationFrame(render);
+        };
+    </script>
+</body>
+</html>
